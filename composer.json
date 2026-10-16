@@ -1,0 +1,17 @@
+{
+  "name": "calmify/laravel",
+  "description": "Receive articles from Calmify on a Laravel website: one install command, one pairing code.",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": "^8.1",
+    "illuminate/support": "^10.0|^11.0|^12.0",
+    "mews/purifier": "^3.4"
+  },
+  "autoload": {
+    "psr-4": { "Calmify\\Laravel\\": "src/" }
+  },
+  "extra": {
+    "laravel": { "providers": ["Calmify\\Laravel\\CalmifyServiceProvider"] }
+  }
+}
