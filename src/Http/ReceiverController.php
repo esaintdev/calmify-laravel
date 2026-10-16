@@ -69,6 +69,10 @@ class ReceiverController extends Controller
 
         $imagePath = null;
         if (! empty($data['image_url'])) {
+            // Pairing saves the asset host; without it no cover can be fetched.
+            if ((string) config('calmify.asset_host') === '') {
+                return response()->json(['error' => 'asset_host_not_set'], 422);
+            }
             $imagePath = $this->downloadCover($data['image_url'], $data['slug']);
             if ($imagePath === null) {
                 return response()->json(['error' => 'image_rejected'], 422);
