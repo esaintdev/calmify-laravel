@@ -16,6 +16,14 @@ use Mews\Purifier\Facades\Purifier;
 // X-Calmify-Key header, compared in constant time.
 class ReceiverController extends Controller
 {
+    // What Calmify sends: headings, paragraphs, lists, quotes, emphasis and
+    // links with their rel. Purifier's default list has no headings and
+    // strips rel (nofollow), so the package passes its own.
+    private const PURIFIER = [
+        'HTML.Allowed' => 'h2,h3,h4,p,br,strong,b,em,i,u,blockquote,ul,ol,li,a[href|title|rel],img[src|alt|width|height]',
+        'Attr.AllowedRel' => ['nofollow', 'noopener', 'noreferrer'],
+    ];
+
     private const MAX_BODY = 600 * 1024;
     private const MAX_IMAGE = 5 * 1024 * 1024;
 
@@ -84,7 +92,7 @@ class ReceiverController extends Controller
                 'idempotency_key' => $key,
                 'slug' => $data['slug'],
                 'title' => $data['title'],
-                'content_html' => Purifier::clean($data['content']),
+                'content_html' => Purifier::clean($data['content'], self::PURIFIER),
                 'category' => $data['category'] ?? '',
                 'meta_description' => $data['meta_description'] ?? '',
                 'meta_keywords' => $data['meta_keywords'] ?? '',
