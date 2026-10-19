@@ -3,6 +3,7 @@
 namespace Calmify\Laravel\Http;
 
 use Calmify\Laravel\Events\PostReceived;
+use Calmify\Laravel\Events\PostUnpublished;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -15,6 +16,7 @@ use Mews\Purifier\Facades\Purifier;
 // Receives posts from Calmify. Every request carries the key in the
 // X-Calmify-Key header, compared in constant time. A request with post_id
 // updates that post (its id and slug must match); one without creates a post.
+// DELETE with post_id and slug unpublishes the post (hides it, keeps the row).
 class ReceiverController extends Controller
 {
     // What Calmify sends: headings, paragraphs, lists, quotes, emphasis and
@@ -165,6 +167,35 @@ class ReceiverController extends Controller
         $post = DB::table($table)->find($current->id);
         event(new PostReceived($post, true));
         return response()->json($this->reply($post), 200);
+    }
+
+    // Unpublishing hides the post: published_at becomes null, the row and its
+    // cover stay so publishing again from Calmify brings the same post back.
+    // Repeating it is harmless.
+    public function unpublish(Request $request): JsonResponse
+    {
+        if (! $this->authorized($request)) {
+            return response()->json(['error' => 'unauthorized'], 401);
+        }
+        $v = validator($request->json()->all(), [
+            'post_id' => 'required|integer|min:1',
+            'slug' => ['required', 'string', 'max:120', 'regex:/^[a-z0-9]+(-[a-z0-9]+)*$/'],
+        ]);
+        if ($v->fails()) {
+            return response()->json(['error' => 'invalid', 'fields' => $v->errors()], 422);
+        }
+        $data = $v->validated();
+        $table = config('calmify.table');
+        $post = DB::table($table)->where('id', $data['post_id'])->where('slug', $data['slug'])->first();
+        if (! $post) {
+            return response()->json(['error' => 'post_not_found'], 404);
+        }
+        if ($post->published_at !== null) {
+            DB::table($table)->where('id', $post->id)->update(['published_at' => null, 'updated_at' => now()]);
+            $post = DB::table($table)->find($post->id);
+        }
+        event(new PostUnpublished($post));
+        return response()->json($this->reply($post) + ['unpublished' => true], 200);
     }
 
     private function reply(object $post): array
