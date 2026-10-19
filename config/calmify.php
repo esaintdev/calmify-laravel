@@ -6,7 +6,7 @@ return [
     // Written by `php artisan calmify:pair`: the only host covers are downloaded from.
     'asset_host' => env('CALMIFY_ASSET_HOST'),
     // Calmify's address (for pairing).
-    'calmify_url' => env('CALMIFY_URL', 'https://calmifye.vercel.app'),
+    'calmify_url' => env('CALMIFY_URL', 'https://joincalmify.com'),
     // Where Calmify sends posts on this site.
     'route' => env('CALMIFY_ROUTE', 'api/calmify/posts'),
     // Table posts are saved to (created by the package migration). To use

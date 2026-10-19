@@ -1,6 +1,6 @@
 # calmify/laravel
 
-Receive articles from [Calmify](https://calmifye.vercel.app) on a Laravel site.
+Receive articles from [Calmify](https://joincalmify.com) on a Laravel site.
 
 ```bash
 composer require calmify/laravel
@@ -16,4 +16,4 @@ When an article is edited and sent again from Calmify ("Update on site"), the re
 
 Images inside articles are downloaded from the asset host like the cover (HTTPS, 5 MB, PNG/JPEG/WebP checked), saved as `<image_dir>/<slug>_inline-….<ext>` on the image disk, and `content_html` points to them. An update removes the ones the new version no longer uses. The connection check reports `features: ["update", "unpublish", "images"]`, so Calmify knows it can send them. Configure with `php artisan vendor:publish --tag=calmify-config`.
 
-Full guide: https://calmifye.vercel.app/docs/connect
+Full guide: https://joincalmify.com/docs/connect
