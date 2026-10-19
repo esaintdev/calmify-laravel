@@ -13,7 +13,8 @@ use Illuminate\Support\Str;
 use Mews\Purifier\Facades\Purifier;
 
 // Receives posts from Calmify. Every request carries the key in the
-// X-Calmify-Key header, compared in constant time.
+// X-Calmify-Key header, compared in constant time. A request with post_id
+// updates that post (its id and slug must match); one without creates a post.
 class ReceiverController extends Controller
 {
     // What Calmify sends: headings, paragraphs, lists, quotes, emphasis and
@@ -64,6 +65,7 @@ class ReceiverController extends Controller
             'image_url' => 'nullable|string|max:2000',
             'image_alt' => 'nullable|string|max:300',
             'publish' => 'nullable|boolean',
+            'post_id' => 'nullable|integer|min:1',
         ]);
         if ($v->fails()) {
             return response()->json(['error' => 'invalid', 'fields' => $v->errors()], 422);
@@ -73,6 +75,15 @@ class ReceiverController extends Controller
 
         if ($existing = DB::table($table)->where('idempotency_key', $key)->first()) {
             return response()->json($this->reply($existing), 200);
+        }
+
+        $current = null;
+        if (! empty($data['post_id'])) {
+            // The slug can't change after publishing, so both must match.
+            $current = DB::table($table)->where('id', $data['post_id'])->where('slug', $data['slug'])->first();
+            if (! $current) {
+                return response()->json(['error' => 'post_not_found'], 404);
+            }
         }
 
         $imagePath = null;
@@ -85,6 +96,10 @@ class ReceiverController extends Controller
             if ($imagePath === null) {
                 return response()->json(['error' => 'image_rejected'], 422);
             }
+        }
+
+        if ($current) {
+            return $this->update($table, $current, $key, $data, $imagePath);
         }
 
         try {
@@ -115,6 +130,41 @@ class ReceiverController extends Controller
         $post = DB::table($table)->find($id);
         event(new PostReceived($post));
         return response()->json($this->reply($post), 201);
+    }
+
+    // Replaces the post's fields with what Calmify sent (the cover too: none
+    // sent means none kept) and fires PostReceived with updated = true.
+    private function update(string $table, object $current, string $key, array $data, ?string $imagePath): JsonResponse
+    {
+        $disk = Storage::disk(config('calmify.image_disk'));
+        try {
+            DB::table($table)->where('id', $current->id)->update([
+                'idempotency_key' => $key,
+                'title' => $data['title'],
+                'content_html' => Purifier::clean($data['content'], self::PURIFIER),
+                'category' => $data['category'] ?? '',
+                'meta_description' => $data['meta_description'] ?? '',
+                'meta_keywords' => $data['meta_keywords'] ?? '',
+                'image_path' => $imagePath,
+                'image_alt' => $data['image_alt'] ?? '',
+                'published_at' => $current->published_at ?? (($data['publish'] ?? true) ? now() : null),
+                'updated_at' => now(),
+            ]);
+        } catch (QueryException $e) {
+            if ($imagePath) {
+                $disk->delete($imagePath);
+            }
+            if ($existing = DB::table($table)->where('idempotency_key', $key)->first()) {
+                return response()->json($this->reply($existing), 200);
+            }
+            throw $e;
+        }
+        if ($current->image_path && $current->image_path !== $imagePath) {
+            $disk->delete($current->image_path);
+        }
+        $post = DB::table($table)->find($current->id);
+        event(new PostReceived($post, true));
+        return response()->json($this->reply($post), 200);
     }
 
     private function reply(object $post): array
