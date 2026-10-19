@@ -29,6 +29,7 @@ class ReceiverController extends Controller
 
     private const MAX_BODY = 600 * 1024;
     private const MAX_IMAGE = 5 * 1024 * 1024;
+    private const MAX_INLINE = 20;
 
     private function authorized(Request $request): bool
     {
@@ -42,7 +43,7 @@ class ReceiverController extends Controller
         if (! $this->authorized($request)) {
             return response()->json(['error' => 'unauthorized'], 401);
         }
-        return response()->json(['ok' => true, 'receiver' => 'laravel']);
+        return response()->json(['ok' => true, 'receiver' => 'laravel', 'features' => ['update', 'unpublish', 'images']]);
     }
 
     public function receive(Request $request): JsonResponse
@@ -94,14 +95,23 @@ class ReceiverController extends Controller
             if ((string) config('calmify.asset_host') === '') {
                 return response()->json(['error' => 'asset_host_not_set'], 422);
             }
-            $imagePath = $this->downloadCover($data['image_url'], $data['slug']);
+            $imagePath = $this->downloadImage($data['image_url'], $data['slug']);
             if ($imagePath === null) {
                 return response()->json(['error' => 'image_rejected'], 422);
             }
         }
 
+        // Images inside the text are downloaded like the cover and point to
+        // the site's own copies.
+        $inline = [];
+        $data['content_html'] = $this->inlineImages(Purifier::clean($data['content'], self::PURIFIER), $data['slug'], $inline);
+        if (! is_string($data['content_html'])) {
+            $this->deleteFiles(array_merge($inline, $imagePath ? [$imagePath] : []));
+            return response()->json(['error' => $data['content_html'] === false ? 'asset_host_not_set' : 'image_rejected'], 422);
+        }
+
         if ($current) {
-            return $this->update($table, $current, $key, $data, $imagePath);
+            return $this->update($table, $current, $key, $data, $imagePath, $inline);
         }
 
         try {
@@ -109,7 +119,7 @@ class ReceiverController extends Controller
                 'idempotency_key' => $key,
                 'slug' => $data['slug'],
                 'title' => $data['title'],
-                'content_html' => Purifier::clean($data['content'], self::PURIFIER),
+                'content_html' => $data['content_html'],
                 'category' => $data['category'] ?? '',
                 'meta_description' => $data['meta_description'] ?? '',
                 'meta_keywords' => $data['meta_keywords'] ?? '',
@@ -120,9 +130,7 @@ class ReceiverController extends Controller
                 'updated_at' => now(),
             ]);
         } catch (QueryException $e) {
-            if ($imagePath) {
-                Storage::disk(config('calmify.image_disk'))->delete($imagePath);
-            }
+            $this->deleteFiles(array_merge($inline, $imagePath ? [$imagePath] : []));
             if ($existing = DB::table($table)->where('idempotency_key', $key)->first()) {
                 return response()->json($this->reply($existing), 200);
             }
@@ -136,14 +144,14 @@ class ReceiverController extends Controller
 
     // Replaces the post's fields with what Calmify sent (the cover too: none
     // sent means none kept) and fires PostReceived with updated = true.
-    private function update(string $table, object $current, string $key, array $data, ?string $imagePath): JsonResponse
+    private function update(string $table, object $current, string $key, array $data, ?string $imagePath, array $inline): JsonResponse
     {
         $disk = Storage::disk(config('calmify.image_disk'));
         try {
             DB::table($table)->where('id', $current->id)->update([
                 'idempotency_key' => $key,
                 'title' => $data['title'],
-                'content_html' => Purifier::clean($data['content'], self::PURIFIER),
+                'content_html' => $data['content_html'],
                 'category' => $data['category'] ?? '',
                 'meta_description' => $data['meta_description'] ?? '',
                 'meta_keywords' => $data['meta_keywords'] ?? '',
@@ -153,9 +161,7 @@ class ReceiverController extends Controller
                 'updated_at' => now(),
             ]);
         } catch (QueryException $e) {
-            if ($imagePath) {
-                $disk->delete($imagePath);
-            }
+            $this->deleteFiles(array_merge($inline, $imagePath ? [$imagePath] : []));
             if ($existing = DB::table($table)->where('idempotency_key', $key)->first()) {
                 return response()->json($this->reply($existing), 200);
             }
@@ -164,6 +170,12 @@ class ReceiverController extends Controller
         if ($current->image_path && $current->image_path !== $imagePath) {
             $disk->delete($current->image_path);
         }
+        // Inline images of the previous version that this one no longer uses.
+        $prefix = $current->slug.'_inline-';
+        $this->deleteFiles(array_filter(
+            $disk->files(config('calmify.image_dir')),
+            fn ($f) => str_starts_with(basename($f), $prefix) && ! in_array($f, $inline, true),
+        ));
         $post = DB::table($table)->find($current->id);
         event(new PostReceived($post, true));
         return response()->json($this->reply($post), 200);
@@ -203,9 +215,48 @@ class ReceiverController extends Controller
         return ['id' => $post->id, 'url' => str_replace('{slug}', $post->slug, config('calmify.post_url'))];
     }
 
+    // Replaces every <img> in the sanitized HTML with the site's own copy,
+    // downloaded from the asset host. Calmify sends no other images, so one
+    // that can't be taken (another host, too big, not an image) rejects the
+    // post: null. False when there's no asset host yet. Files are named
+    // "<slug>_inline-…" (slugs have no "_", so no other post matches).
+    private function inlineImages(string $html, string $slug, array &$saved): string|false|null
+    {
+        if (! preg_match_all('/<img\b[^>]*>/i', $html, $m)) {
+            return $html;
+        }
+        if ((string) config('calmify.asset_host') === '') {
+            return false;
+        }
+        if (count($m[0]) > self::MAX_INLINE) {
+            return null;
+        }
+        $disk = Storage::disk(config('calmify.image_disk'));
+        $failed = false;
+        $out = preg_replace_callback('/<img\b[^>]*>/i', function ($tag) use ($slug, $disk, &$saved, &$failed) {
+            preg_match('/\ssrc="([^"]*)"/i', $tag[0], $src);
+            preg_match('/\salt="([^"]*)"/i', $tag[0], $alt);
+            $path = isset($src[1]) ? $this->downloadImage(html_entity_decode($src[1], ENT_QUOTES | ENT_HTML5), $slug.'_inline') : null;
+            if ($path === null) {
+                $failed = true;
+                return '';
+            }
+            $saved[] = $path;
+            return '<img src="'.e($disk->url($path)).'" alt="'.($alt[1] ?? '').'">';
+        }, $html);
+        return $failed ? null : $out;
+    }
+
+    private function deleteFiles(array $paths): void
+    {
+        if ($paths) {
+            Storage::disk(config('calmify.image_disk'))->delete(array_values($paths));
+        }
+    }
+
     // Only from the asset host saved at pairing, over HTTPS, no redirects,
     // at most 5 MB, and only real PNG/JPEG/WebP bytes.
-    private function downloadCover(string $url, string $slug): ?string
+    private function downloadImage(string $url, string $slug): ?string
     {
         $parts = parse_url($url);
         $host = (string) config('calmify.asset_host');
